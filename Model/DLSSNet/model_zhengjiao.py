@@ -105,7 +105,7 @@ class Net(nn.Module):
         # dec_x = torch.mul(dec_x, mask_index)
         all_att = {'encoder_att': attn, 'state_attn':attn_class, 'decoder_attn': dec_attn}
         
-        # return all_att, out, dec_x, embeded_x, basis, Pooled_x, Encoded_x, scaler, scores
-        return out
+        return all_att, out, dec_x, embeded_x, basis, Pooled_x, Encoded_x, scaler, scores
+        # return out
 
         
