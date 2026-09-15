@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+
+# Copyrighted reference paper -- keep local only
+researach_papers/
+
+# Data and experiment outputs -- large/binary, don't belong in git
+ExperimentResults_CorrectedProtocol/
+*.tar.gz
