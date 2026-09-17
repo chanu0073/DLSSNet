@@ -78,12 +78,24 @@ def main():
     if data_config.bad_subs is not None:
         subs = [s for s in subs if s not in data_config.bad_subs]
 
+    os.makedirs(data_config.Result_PATH, exist_ok=True)
     results_path = os.path.join(data_config.Result_PATH, "results.json")
     summary_path = os.path.join(data_config.Result_PATH, "summary.txt")
 
     all_results = []
+    if os.path.exists(results_path):
+        with open(results_path) as f:
+            all_results = json.load(f)
+        print(f"resuming: loaded {len(all_results)} already-completed run(s) from {results_path}", flush=True)
+
+    completed = {(r["subject"], r["seed"]) for r in all_results}
+
     for subid in subs:
         for seed in data_config.seeds:
+            if (subid, seed) in completed:
+                print(f"=== subject {subid:02d} seed {seed}: already completed, skipping ===", flush=True)
+                continue
+
             print(f"=== subject {subid:02d} seed {seed} ===", flush=True)
             set_seed(seed)
 
@@ -97,11 +109,13 @@ def main():
             model = build_model().to(device)
             optimizer = eval(data_config.optimizer)(model.parameters(), **data_config.optimizer_parm)
 
-            trainer = CorrectedProtocolTrainer(model, device, data_config)
-            result = trainer.run(trainloader, validloader, testloader, optimizer)
-
             ckpt_dir = os.path.join(data_config.MODEL_PATH, f"subject{subid:02d}_seed{seed}")
             os.makedirs(ckpt_dir, exist_ok=True)
+            resume_ckpt_path = os.path.join(ckpt_dir, "resume_checkpoint.pkl")
+
+            trainer = CorrectedProtocolTrainer(model, device, data_config)
+            result = trainer.run(trainloader, validloader, testloader, optimizer, ckpt_path=resume_ckpt_path)
+
             torch.save(
                 {
                     "net_state_dict": result["model_state"],
@@ -121,17 +135,26 @@ def main():
 
             all_results.append(
                 dict(
-                    subject=subid,
-                    seed=seed,
-                    best_val_acc=result["best_val_acc"],
-                    best_epoch=result["best_epoch"],
-                    test_acc=result["test_acc"],
-                    elapsed_s=result["elapsed_s"],
+                    # plain int()/float() -- data_config.subs is a numpy array,
+                    # so subid can be numpy.int64, and result values can be
+                    # numpy scalars too; none of those are JSON-serializable.
+                    subject=int(subid),
+                    seed=int(seed),
+                    best_val_acc=float(result["best_val_acc"]),
+                    best_epoch=int(result["best_epoch"]),
+                    test_acc=float(result["test_acc"]),
+                    elapsed_s=float(result["elapsed_s"]),
                 )
             )
 
-            with open(results_path, "w") as f:
+            # Write atomically -- a crash/error mid-dump must never leave a
+            # truncated results.json behind, since that file is read back on
+            # every resume attempt (a corrupt file would break resuming the
+            # very run this is meant to protect).
+            tmp_results_path = results_path + ".tmp"
+            with open(tmp_results_path, "w") as f:
                 json.dump(all_results, f, indent=2)
+            os.replace(tmp_results_path, results_path)
 
     # Summary: mean +/- std per subject across seeds, then overall average.
     per_subject = {}

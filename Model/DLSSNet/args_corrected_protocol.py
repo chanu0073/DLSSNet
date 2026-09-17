@@ -1,6 +1,5 @@
 import os
 import numpy as np
-from datetime import datetime
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -55,9 +54,12 @@ class data_config:
     optimizer = "torch.optim.Adam"
     optimizer_parm = {"lr": lr, "betas": (0.5, 0.999)}
 
-    Time = datetime.now()
-    formatedtime = "ON" + Time.strftime("%Y-%m-%d") + "At" + Time.strftime("%H-%M-%S")
-    Result_PATH = os.path.join(savepath, formatedtime)
+    # NOTE: intentionally NOT timestamped. Resuming after a crash/interruption
+    # means re-running this same script as a fresh process, and it needs to
+    # land on the exact same results.json / checkpoint paths as the run it's
+    # continuing -- a per-run timestamp would silently start a new, empty
+    # results folder every time and defeat resumability.
+    Result_PATH = savepath
     MODEL_PATH = os.path.join(Result_PATH, "ckpl")
     if not os.path.exists(MODEL_PATH):
         os.makedirs(MODEL_PATH)

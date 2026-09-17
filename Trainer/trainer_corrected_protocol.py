@@ -1,3 +1,4 @@
+import os
 import time
 
 import torch
@@ -66,15 +67,56 @@ class CorrectedProtocolTrainer:
                 total += labels.size(0)
         return correct / total
 
-    def run(self, trainloader, validloader, testloader, optimizer, writer=None, log_every=20):
+    def _save_checkpoint(self, ckpt_path, epoch, optimizer, best_val_acc, best_epoch, best_state, epochs_since_improve):
+        payload = {
+            "epoch": epoch,
+            "model_state": self.model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "best_val_acc": best_val_acc,
+            "best_epoch": best_epoch,
+            "best_state": best_state,
+            "epochs_since_improve": epochs_since_improve,
+            "rng_state": torch.get_rng_state(),
+            "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        }
+        # Write to a temp file and rename atomically, so a crash/power-loss
+        # mid-write can never leave a truncated, unloadable checkpoint behind.
+        tmp_path = ckpt_path + ".tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, ckpt_path)
+
+    def run(self, trainloader, validloader, testloader, optimizer, ckpt_path=None, writer=None, log_every=20, save_every=100):
         cfg = self.config
         best_val_acc = -1.0
         best_state = None
         best_epoch = 0
         epochs_since_improve = 0
+        start_epoch = 1
         t0 = time.time()
 
-        for epoch in range(1, cfg.max_epochs + 1):
+        if ckpt_path is not None and os.path.exists(ckpt_path):
+            try:
+                ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+                self.model.load_state_dict(ckpt["model_state"])
+                optimizer.load_state_dict(ckpt["optimizer_state"])
+                start_epoch = ckpt["epoch"] + 1
+                best_val_acc = ckpt["best_val_acc"]
+                best_epoch = ckpt["best_epoch"]
+                best_state = ckpt["best_state"]
+                epochs_since_improve = ckpt["epochs_since_improve"]
+                torch.set_rng_state(ckpt["rng_state"].cpu())
+                if torch.cuda.is_available() and ckpt.get("cuda_rng_state") is not None:
+                    torch.cuda.set_rng_state_all([s.cpu() for s in ckpt["cuda_rng_state"]])
+                print(
+                    f"  resumed from {ckpt_path}: continuing at epoch {start_epoch}, "
+                    f"best_val_acc so far={best_val_acc:.4f}@{best_epoch}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"  WARNING: failed to load checkpoint ({e}); starting fresh from epoch 1", flush=True)
+                start_epoch = 1
+
+        for epoch in range(start_epoch, cfg.max_epochs + 1):
             self.model.train()
             for imgs, labels in trainloader:
                 imgs, labels = imgs.to(self.device), labels.to(self.device)
@@ -96,6 +138,11 @@ class CorrectedProtocolTrainer:
             else:
                 epochs_since_improve += 1
 
+            if ckpt_path is not None and epoch % save_every == 0:
+                self._save_checkpoint(
+                    ckpt_path, epoch, optimizer, best_val_acc, best_epoch, best_state, epochs_since_improve
+                )
+
             if epoch % log_every == 0 or epoch == 1:
                 print(
                     f"  epoch {epoch}/{cfg.max_epochs} val_acc={val_acc:.4f} "
@@ -113,6 +160,10 @@ class CorrectedProtocolTrainer:
         self.model.load_state_dict(best_state)
         test_acc = self._eval(testloader)  # touched exactly once
         elapsed = time.time() - t0
+
+        if ckpt_path is not None and os.path.exists(ckpt_path):
+            os.remove(ckpt_path)  # completed successfully -- no longer needed for resume
+
         return dict(
             best_val_acc=best_val_acc,
             best_epoch=best_epoch,

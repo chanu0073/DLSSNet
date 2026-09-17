@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.venv/
 
 # Copyrighted reference paper -- keep local only
 researach_papers/
