@@ -7,6 +7,42 @@ from torch import nn
 from utils.My_loss import reg_loss
 
 
+def segment_recombine(x, y, num_class, n_segments=8, aug_rate=1.0):
+    """Segmentation-and-recombination (S&R) augmentation, as in EEG Conformer
+    (Song et al., 2023): each augmented trial is stitched together from
+    `n_segments` consecutive time segments, each taken from a randomly chosen
+    training trial of the SAME class, preserving temporal order. Conformer's
+    ablation puts this at +3.75% average / +5% on hard subjects on BCI IV-2a.
+
+    Differences from this repo's older DataLoader.interaug: sources are drawn
+    from the whole class pool (not just the current mini-batch, which with
+    batch_size=10 gave only 2-3 source trials per class), and segments are
+    coarse (8 by default, ~55 samples here) rather than 16-sample frames --
+    27 fine frames from 27 different trials scrambles exactly the fine
+    temporal dynamics this model is built to capture.
+
+    x: (N, C, T) tensor, y: (N,) long. Returns (x_aug, y_aug) with
+    int(n_c * aug_rate) new trials per class c. Uses torch's global RNG, so
+    it is covered by set_seed() and by the resume checkpoint's saved RNG state.
+    """
+    N, C, T = x.shape
+    bounds = torch.linspace(0, T, n_segments + 1).long()
+    xs, ys = [], []
+    for c in range(num_class):
+        idx = torch.nonzero(y == c).flatten()
+        n_aug = int(idx.numel() * aug_rate)
+        if idx.numel() == 0 or n_aug == 0:
+            continue
+        src = idx[torch.randint(0, idx.numel(), (n_aug, n_segments))]  # (n_aug, S) source trial per segment
+        out = torch.empty((n_aug, C, T), dtype=x.dtype)
+        for s in range(n_segments):
+            a, b = bounds[s].item(), bounds[s + 1].item()
+            out[:, :, a:b] = x[src[:, s], :, a:b]
+        xs.append(out)
+        ys.append(torch.full((n_aug,), c, dtype=y.dtype))
+    return torch.cat(xs), torch.cat(ys)
+
+
 class CorrectedProtocolTrainer:
     """
     Trains DLSSNet with a leakage-free protocol:
@@ -85,6 +121,30 @@ class CorrectedProtocolTrainer:
         torch.save(payload, tmp_path)
         os.replace(tmp_path, ckpt_path)
 
+    def _train_batches(self, trainloader):
+        """Yields (imgs, labels) for one epoch. With augmentation off this is
+        exactly the original DataLoader iteration (so the un-augmented
+        baseline stays bit-for-bit reproducible). With it on, a fresh S&R
+        pool is generated from the full training set each epoch and mixed
+        with the real trials, then shuffled and batched at the same size."""
+        cfg = self.config
+        if not getattr(cfg, "data_augment", False):
+            yield from trainloader
+            return
+        x_train, y_train = trainloader.dataset.tensors
+        x_aug, y_aug = segment_recombine(
+            x_train, y_train, cfg.num_class,
+            n_segments=getattr(cfg, "aug_segments", 8),
+            aug_rate=getattr(cfg, "aug_rate", 1.0),
+        )
+        x_ep = torch.cat([x_train, x_aug])
+        y_ep = torch.cat([y_train, y_aug])
+        perm = torch.randperm(len(x_ep))
+        bs = trainloader.batch_size
+        for i in range(0, len(x_ep), bs):
+            b = perm[i : i + bs]
+            yield x_ep[b], y_ep[b]
+
     def run(self, trainloader, validloader, testloader, optimizer, ckpt_path=None, writer=None, log_every=20, save_every=100):
         cfg = self.config
         best_val_acc = -1.0
@@ -92,7 +152,7 @@ class CorrectedProtocolTrainer:
         best_epoch = 0
         epochs_since_improve = 0
         start_epoch = 1
-        t0 = time.time()
+        t0 = time.monotonic()
 
         if ckpt_path is not None and os.path.exists(ckpt_path):
             try:
@@ -118,7 +178,7 @@ class CorrectedProtocolTrainer:
 
         for epoch in range(start_epoch, cfg.max_epochs + 1):
             self.model.train()
-            for imgs, labels in trainloader:
+            for imgs, labels in self._train_batches(trainloader):
                 imgs, labels = imgs.to(self.device), labels.to(self.device)
                 out, dec_x, y, basis = self._forward(imgs)
                 loss, cls_loss, dec_loss, reg_loss_v = self._loss(out, labels, dec_x, y, basis)
@@ -146,7 +206,7 @@ class CorrectedProtocolTrainer:
             if epoch % log_every == 0 or epoch == 1:
                 print(
                     f"  epoch {epoch}/{cfg.max_epochs} val_acc={val_acc:.4f} "
-                    f"best={best_val_acc:.4f}@{best_epoch} elapsed={time.time() - t0:.0f}s",
+                    f"best={best_val_acc:.4f}@{best_epoch} elapsed={time.monotonic() - t0:.0f}s",
                     flush=True,
                 )
 
@@ -159,7 +219,7 @@ class CorrectedProtocolTrainer:
 
         self.model.load_state_dict(best_state)
         test_acc = self._eval(testloader)  # touched exactly once
-        elapsed = time.time() - t0
+        elapsed = time.monotonic() - t0
 
         if ckpt_path is not None and os.path.exists(ckpt_path):
             os.remove(ckpt_path)  # completed successfully -- no longer needed for resume

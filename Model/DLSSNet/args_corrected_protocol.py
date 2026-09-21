@@ -14,9 +14,20 @@ class data_config:
         "/home/wangkaixuan/Code/data/BCICIV_2a_mat/",
     )
     gpu_id = int(os.environ.get("DLSSNET_GPU", "0"))
+
+    # ---- Segmentation-and-recombination augmentation (EEG Conformer's S&R) ----
+    # The DLSSNet paper trained without augmentation so the *analysed* trials
+    # stay "intrinsic" -- but the interpretability protocol only ever feeds
+    # real, correctly-classified trials post hoc, so training augmentation
+    # doesn't touch it. Conformer's ablation: +3.75% avg, up to +5% on the hard
+    # subjects. Set False to reproduce the un-augmented 66.94% baseline exactly.
+    data_augment = True
+    aug_segments = 8  # Conformer's validated N_s; coarse segments keep within-segment dynamics intact
+    aug_rate = 1.0  # augmented trials per epoch, as a fraction of the real training set
+
     savepath = os.environ.get(
         "DLSSNET_SAVE_PATH",
-        os.path.join(REPO_ROOT, "ExperimentResults_CorrectedProtocol"),
+        os.path.join(REPO_ROOT, "ExperimentResults_CorrectedProtocol" + ("_aug" if data_augment else "")),
     )
 
     dataset = "BCICom_2a"
