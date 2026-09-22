@@ -75,6 +75,10 @@ class CorrectedProtocolTrainer:
 
     def _forward(self, x):
         m = self.model
+        if hasattr(m, "forward_for_loss"):
+            # Variants whose heads need more than the encoder output (e.g.
+            # model_spd.py) supply (out, dec_x, y, basis) themselves.
+            return m.forward_for_loss(x)
         x = x.to(torch.float32)
         x = m.Embedding(x)
         embeded_x = torch.detach(x)
