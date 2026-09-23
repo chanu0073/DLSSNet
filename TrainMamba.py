@@ -26,6 +26,7 @@ from Model.DLSSNet.args_mamba import data_config
 from Model.DLSSNet.model_mamba import Net
 from DataLoader.GetBci2a import getAllDataloader
 from Trainer.trainer_corrected_protocol import CorrectedProtocolTrainer
+from utils.gpu_limit import cap_gpu_memory
 
 
 def set_seed(seed):
@@ -60,6 +61,7 @@ def build_model():
 def main():
     device = torch.device(f"cuda:{data_config.gpu_id}" if torch.cuda.is_available() else "cpu")
     print(f"using device: {device}", flush=True)
+    cap_gpu_memory(device)
     print(f"data_path: {data_config.data_path}", flush=True)
     print(f"results will be saved under: {data_config.Result_PATH}", flush=True)
 
