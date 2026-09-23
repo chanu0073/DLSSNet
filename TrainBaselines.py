@@ -10,11 +10,15 @@ comparison table is legitimate.
 
 Usage:
     DLSSNET_DATA_PATH=/path/to/BCICIV_2a_mat DLSSNET_GPU=0 \\
-        python TrainBaselines.py --models eegnet deepconvnet -- 1 2 3
+        python TrainBaselines.py --models matt --subjects 1 2 3
 
-    python TrainBaselines.py                      # all models, all subjects, all seeds
-    python TrainBaselines.py --models matt        # one model, all subjects
-    python TrainBaselines.py --list               # show available models
+    python TrainBaselines.py                             # all models, all subjects, all seeds
+    python TrainBaselines.py --models matt               # one model, all subjects
+    python TrainBaselines.py --subjects 1 2              # all models, subjects 1-2
+    python TrainBaselines.py --list                      # show available models
+
+    Use --subjects (not a bare trailing list) whenever --models is also
+    given; argparse would otherwise read the ids as model names.
 
 Results go to ExperimentResults_Baselines/<model>/{results.json,summary.txt}.
 Each model keeps its own directory, so models can be run as separate
@@ -203,7 +207,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", nargs="+", default=list(BASELINES), choices=list(BASELINES))
     ap.add_argument("--list", action="store_true", help="list available models and exit")
-    ap.add_argument("subjects", nargs="*", type=int, help="subject ids (default: all)")
+    # --subjects, not a bare positional after --models: `--models matt 1 2 3`
+    # makes argparse swallow the subject ids as model names and exit(2). The
+    # positional form still works when --models is absent or comes last.
+    ap.add_argument("--subjects", nargs="+", type=int, default=None, help="subject ids (default: all)")
+    ap.add_argument("subjects_positional", nargs="*", type=int, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.list:
@@ -216,7 +224,7 @@ def main():
     print(f"data_path: {data_config.data_path}", flush=True)
     print(f"results under: {data_config.Result_PATH}", flush=True)
 
-    subs = args.subjects or list(data_config.subs)
+    subs = args.subjects or args.subjects_positional or list(data_config.subs)
     overall = {name: run_model(name, BASELINES[name], subs, device) for name in args.models}
 
     print("=== overall (mean of per-subject means) ===", flush=True)
