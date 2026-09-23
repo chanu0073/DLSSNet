@@ -12,7 +12,10 @@ class data_config(_base):
     model_name = "DLSSNet_SPD"
 
     # ---- covariance / SPD readout (new) ----
-    spd_dim = 20  # BiMap projection k=60 -> 20 before the covariance (210 log-Cholesky features per segment)
+    # 8, not 20: at 20 the branch contributed 630 features against 1380 from
+    # the states -- a lot of extra capacity aimed at 252 training trials, and
+    # it cost 6.5 points. 8 gives 36 features/segment, 108 total.
+    spd_dim = 8
     spd_segments = 3  # temporal segments per trial, as in MAtt (m=3)
     spd_eps = 1e-4
 

@@ -92,15 +92,31 @@ class SPDClassificationHead(ClassificationTransHead):
 
     def __init__(self, d_model, d_k, num_heads, dropout, state_classes, n_classes, spd_dim_out):
         super().__init__(d_model, d_k, num_heads, dropout, state_classes, n_classes)
-        self.fc = nn.Sequential(
-            nn.Linear(state_classes * d_model + spd_dim_out, 256),
-            nn.ELU(),
-            nn.Dropout(0.5),
-            nn.Linear(256, 32),
-            nn.ELU(),
-            nn.Dropout(0.3),
-            nn.Linear(32, n_classes),
-        )
+        self.state_dim = state_classes * d_model
+        # Widen ONLY fc[0], reusing the baseline's weights for the state
+        # columns and zeroing the SPD columns; fc[3] and fc[6] stay exactly
+        # as super() built them. So at init this model is the baseline model,
+        # parameter for parameter, and the SPD branch is an exact no-op.
+        #
+        # The first attempt (fresh Sequential, ordinary init) lost 6.5 points,
+        # and the diagnostic was in best_epoch: it collapsed from a median of
+        # ~170 to ~81, several runs peaking at epoch 22-60. Validation
+        # accuracy stayed high while test fell -- the branch was a shortcut
+        # that fit the 36-trial validation set fast, and early stopping then
+        # locked in a checkpoint from before the main pathway had learned.
+        #
+        # Note the branch is briefly dormant, not permanently dead: with the
+        # SPD columns at zero, no gradient reaches spd.proj on the first step
+        # (dL/d spd_feat = W_spd^T dL/dpre = 0), but those columns themselves
+        # do get gradient, so after one optimizer step they are non-zero and
+        # the whole branch starts learning.
+        old_fc0 = self.fc[0]
+        new_fc0 = nn.Linear(self.state_dim + spd_dim_out, 256)
+        with torch.no_grad():
+            new_fc0.weight.zero_()
+            new_fc0.weight[:, : self.state_dim].copy_(old_fc0.weight)
+            new_fc0.bias.copy_(old_fc0.bias)
+        self.fc[0] = new_fc0
 
     def forward(self, x, spd_feat):
         summary_token = self.summary_token.repeat((x.shape[0], 1, 1))
@@ -145,7 +161,14 @@ class Net(nn.Module):
             max_len=num_frame,
             low_p=low_p,
         )
-        self.spd = SPDReadout(d_model, spd_dim=spd_dim, n_segments=spd_segments, eps=spd_eps)
+        # Construction order matters and must match model_zhengjiao.Net
+        # exactly (Embedding, Encoder, Decoder, classhead): modules consume
+        # the RNG stream as they are built, so any reordering silently
+        # re-rolls the init of everything downstream. With this order, and
+        # with the new branch built last, every shared parameter is
+        # bit-identical to the baseline at the same seed.
+        d_ff = transformerparwiseforward_dimrat * d_model
+        self.Decoder = DecoderLayer(d_model=d_model, d_k=d_model, n_heads=num_head, d_ff=d_ff, dropout=dropout)
         self.classhead = SPDClassificationHead(
             d_model=d_model,
             d_k=d_model,
@@ -153,10 +176,9 @@ class Net(nn.Module):
             dropout=dropout,
             state_classes=statenum,
             n_classes=num_class,
-            spd_dim_out=self.spd.out_dim,
+            spd_dim_out=spd_segments * spd_dim * (spd_dim + 1) // 2,
         )
-        d_ff = transformerparwiseforward_dimrat * d_model
-        self.Decoder = DecoderLayer(d_model=d_model, d_k=d_model, n_heads=num_head, d_ff=d_ff, dropout=dropout)
+        self.spd = SPDReadout(d_model, spd_dim=spd_dim, n_segments=spd_segments, eps=spd_eps)
 
     def _run(self, x):
         x = x.to(torch.float32)
