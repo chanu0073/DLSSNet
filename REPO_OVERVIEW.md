@@ -138,3 +138,110 @@ This matters because `SingleTraining.py` — the actual training entry point —
 - **No dedicated ablation scripts/checkpoints** for the FTC/FAC/FToAC variants in Fig. 4 — reproducing that experiment requires hand-modifying the model to drop/replace modules.
 - **K-selection in `kmeans_clustering.py` doesn't match the paper's stated method.** Appendix B.1 selects the cluster count K via an SSE-elbow criterion *combined with* task-relevance-probability thresholds (Eq. B.1–B.2 — a joint, multi-criterion selection). The repo's `find_optimal_k()` only maximizes silhouette score — simpler, and not the paper-specified criterion. This is notable because it's the most recently added feature in the repo (the K-means clustering commit) and doesn't implement the published method for choosing K.
 - ~~The Contextual Embedding Block's task-relevance mask isn't applied where the paper describes it~~ — **correction: this is not actually a gap.** The ABE module has three sub-blocks: Contextual Embedding (masked attention, Eq. A.3), Subspace Encoding (Eq. A.4, no mask specified), Subspace Decoding. The Eq. A.3 mask is correctly implemented — just inside `Encoder`/`EncoderLayer` (`Model/DLSSNet/layers_zhengjiao.py:273-281`, via `Pool`'s `p_filter` building the `d·dᵀ` mask and passing it into `enc_self_attn`), which *is* the Contextual Embedding Block, not `ClassificationTransHead`. `ClassificationTransHead` implements only Subspace Encoding, whose own Eq. A.4 has no mask term and whose diagram shows no mask arrow — so it correctly has none. An earlier pass at this report mis-mapped all three ABE sub-blocks onto `ClassificationTransHead` alone and flagged a false gap.
+
+## 11. Experimental results under a corrected protocol
+
+All numbers below are our own runs on BCI IV-2a, **not** the published ones.
+Protocol for every row, without exception: session T split into train (252
+trials) and validation (36); validation used only for early stopping;
+session E (288 trials) held out and touched exactly once; 3 seeds per
+subject; segmentation-and-recombination (S&R) augmentation on; Adam,
+lr 2e-4, batch 10, max 3000 epochs, patience 300. Reported value is the
+mean of per-subject means over 3 seeds.
+
+Reproduce with `TrainCorrectedProtocol.py` (DLSSNet), `TrainBaselines.py`
+(the five baselines), `TrainMamba.py`, `TrainSPD.py`.
+
+### 11.1 Main comparison
+
+| Model | Avg (%) | S1 | S2 | S3 | S4 | S5 | S6 | S7 | S8 | S9 | vs DLSSNet+S&R |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **MAtt** | **73.65** | 86.6 | 58.5 | 83.8 | 68.6 | 63.3 | 50.7 | 88.8 | 83.0 | 79.6 | **+3.20, t=+3.25, p=0.012, better on 7/9** |
+| DLSSNet +S&R | 70.45 | 82.4 | 51.5 | 84.4 | 64.5 | 58.6 | 52.9 | 84.1 | 81.2 | 74.4 | (reference) |
+| FBCNet | 69.38 | 75.1 | 54.9 | 83.1 | 62.6 | 62.0 | 50.2 | 79.5 | 80.9 | 76.0 | −1.07, p=0.398 (n.s.) |
+| EEG Conformer | 68.70 | 83.2 | 45.8 | 79.6 | 61.6 | 53.5 | 51.2 | 86.0 | 77.3 | 80.1 | −1.75, p=0.206 (n.s.) |
+| DLSSNet (no aug) | 66.94 | 78.2 | 49.8 | 85.2 | 57.2 | 53.1 | 49.3 | 78.7 | 73.7 | 77.2 | −3.51, p=0.018 |
+| DLSSNet +SPD | 65.81 | 76.7 | 46.6 | 84.3 | 53.8 | 50.8 | 46.0 | 78.8 | 79.8 | 75.5 | −4.64, p=0.006 |
+| DLSSNet +Mamba | 64.91 | 76.4 | 47.0 | 83.5 | 64.0 | 49.3 | 43.3 | 69.9 | 76.7 | 74.1 | −5.54, p=0.008 |
+| EEGNet | 63.10 | 71.3 | 46.4 | 83.2 | 52.4 | 42.6 | 46.1 | 67.2 | 78.4 | 80.3 | −7.34, p=0.018 |
+| DeepConvNet | 56.92 | 64.1 | 39.5 | 73.8 | 48.4 | 33.1 | 35.8 | 67.2 | 72.1 | 78.2 | −13.53, p=0.001 |
+
+Paired t-test across the 9 per-subject means; Wilcoxon signed-rank agrees
+on every row (MAtt p=0.023, SPD p=0.012, Mamba p=0.004, EEGNet p=0.027,
+DeepConvNet p=0.008).
+
+### 11.2 Three findings
+
+**1. The published ranking inverts.** DLSSNet's Table 1 has DLSSNet ahead of
+MAtt, 78.51 to 75.81. Under honest evaluation MAtt leads DLSSNet by 3.20
+points (p=0.012, better on 7 of 9 subjects).
+
+**2. The corrected protocol validates externally.** MAtt's own paper reports
+74.71% ± 5.01 using a protocol that was already clean (validation split from
+session 1, test on session 2, 10 repeats). We measure **73.65%** — agreement
+within 1.06 points. So the protocol here is not unfairly harsh: it
+reproduces a paper that never leaked. DLSSNet, evaluated the same way,
+falls 8.06 points. That asymmetry is the signature of a leak in one
+evaluation and not the other.
+
+| Model | Published (DLSSNet Table 1) | Corrected | Δ |
+|---|---|---|---|
+| DLSSNet | 78.51 | 70.45 | **−8.06** |
+| MAtt | 75.81 | 73.65 | −2.16 |
+| EEG Conformer | 71.33 | 68.70 | −2.63 |
+| EEGNet | 61.46 | 63.10 | +1.64 |
+| DeepConvNet | 66.98 | 56.92 | −10.06 |
+
+**3. DLSSNet benefited disproportionately from the leak** (−8.06) compared
+with MAtt (−2.16) and Conformer (−2.63) — consistent with its longer
+training and larger capacity giving test-set-based epoch selection more
+lucky epochs to choose from.
+
+### 11.3 What helped and what did not
+
+The only change that improved DLSSNet was on the training side, not the
+architecture:
+
+- **S&R augmentation: +3.51 points** (66.94 → 70.45, p=0.018, 7/9 subjects).
+  EEG Conformer's own ablation reports +3.75 for the same technique. The
+  DLSSNet paper disables augmentation to keep analysed trials "intrinsic",
+  but its interpretability protocol only ever consumes real, correctly
+  classified trials post hoc, so training augmentation does not affect it.
+  Seed variance also fell for 7 of 9 subjects.
+
+Three architectural extensions were implemented and all lost:
+
+- **Mamba backbone (−5.54)**: a real selective SSM (`model_mamba.py`)
+  replacing the conv/attention backbone, i.e. the redesign in `vit ap.docx`.
+  1.53x the parameters on 252 training trials per subject.
+- **SPD covariance readout, cold start (−6.49)**: MAtt's mechanism as an
+  added branch. Its `best_epoch` median collapsed from 147 to 81 — the
+  branch was a shortcut that fit the 36-trial validation set quickly, and
+  early stopping then locked in an under-trained main pathway.
+- **SPD covariance readout, warm start (−4.64)**: fixing exactly that (the
+  branch made an exact no-op at init, `spd_dim` 20→8) restored the
+  `best_epoch` median to 140 and recovered 1.8 points, confirming the
+  diagnosis — but the branch still hurts. Two independent configurations,
+  both worse; the failure is not an optimization artifact.
+
+Why the SPD branch fails where MAtt succeeds: MAtt makes covariance the
+*entire* representation with geometry-aware attention over it, whereas
+bolting extra features onto a model that already works just adds capacity
+against a tiny training set.
+
+### 11.4 Limitations of these numbers
+
+- **Shared hyperparameters.** Every model uses DLSSNet's optimizer and
+  learning rate rather than its own published recipe. That is the point —
+  one protocol, one set of conditions — but a model tuned elsewhere may not
+  be at its best here. DeepConvNet is the most likely casualty (−10.06 vs
+  its published number; it is known to rely on cropped training). That
+  EEGNet *improved* (+1.64) argues the shared recipe is not uniformly
+  punishing baselines.
+- **Augmentation applied to all models**, which differs from the published
+  no-augmentation setup, but uniformly so.
+- **3 seeds per subject.** Enough for the paired tests above, not enough to
+  pin down per-subject variance tightly (per-subject std ranges 0.1–14
+  points; subject 5 under EEGNet is the outlier at ±14).
+- **Single dataset.** BCI IV-2a only; the paper's HGD results remain
+  unreproduced, as no HGD data or checkpoints ship with the repo.
