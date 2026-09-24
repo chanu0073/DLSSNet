@@ -26,7 +26,15 @@ Usage:
 
     python TuneCV.py --list                    # show configurations
     python TuneCV.py                           # every config, default subjects
-    python TuneCV.py --folds 4                 # cheaper, noisier (std err 3.6)
+    python TuneCV.py --folds 4                 # half the runs, same 288 trials
+
+To parallelise, give each process its own --out so their results files cannot
+clobber each other, then pool the shards into one ranking:
+
+    for c in baseline small_dmodel tiny; do
+        python TuneCV.py --configs $c --out TuneResults/$c &
+    done; wait
+    python TuneCV.py --report TuneResults
 
 Defaults to subjects 3 / 4 / 6 -- easy / middling / hard, by the mean over
 six architectures (81.3 / 59.7 / 47.8). Tuning only on easy subjects would
@@ -109,11 +117,45 @@ def main():
     ap.add_argument("--patience", type=int, default=None, help="override (changes conditions vs the final protocol)")
     ap.add_argument("--out", default=os.environ.get("DLSSNET_TUNE_OUT", "TuneResults"))
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--report", metavar="DIR", default=None,
+                    help="summarise every cv_results.json under DIR and exit -- use this to\npool shards that were run as separate parallel processes")
     args = ap.parse_args()
 
     if args.list:
         for name, ov in CONFIGS.items():
             print(f"  {name:14s} {ov if ov else '(unchanged -- the 70.45% control)'}")
+        return
+
+    if args.report:
+        # Parallel shards each own a separate --out directory (one results
+        # file per process, so they can never clobber each other); this pools
+        # them back into one ranking.
+        rows, files = [], []
+        for dirpath, _, fnames in os.walk(args.report):
+            if "cv_results.json" in fnames:
+                f = os.path.join(dirpath, "cv_results.json")
+                with open(f) as fh:
+                    rows += json.load(fh)
+                files.append(f)
+        if not rows:
+            print(f"no cv_results.json found under {args.report}")
+            return
+        seen, dups = set(), 0
+        deduped = []
+        for r in rows:
+            k = (r["config"], r["subject"], r["fold"])
+            if k in seen:
+                dups += 1
+                continue
+            seen.add(k)
+            deduped.append(r)
+        if dups:
+            # Shards are meant to be disjoint; overlap means a config/subject
+            # was run twice and keeping both would weight it unequally.
+            print(f"WARNING: dropped {dups} duplicate (config, subject, fold) row(s) -- shards overlap")
+        rows = deduped
+        print(f"pooled {len(rows)} fold-run(s) from {len(files)} shard(s)")
+        summarise(rows, os.path.join(args.report, "cv_results_pooled.json"), seed=args.seed)
         return
 
     extra = {}
@@ -170,15 +212,17 @@ def main():
                     json.dump(rows, fh, indent=2)
                 os.replace(tmp, results_path)
 
-    summarise(rows, args, results_path)
+    summarise(rows, results_path, seed=args.seed)
 
 
-def summarise(rows, args, results_path):
+def summarise(rows, results_path, seed=0):
     by_cfg = {}
     for r in rows:
         by_cfg.setdefault(r["config"], {}).setdefault(r["subject"], []).append(r["val_acc"])
 
-    lines = [f"CV tuning: {args.folds}-fold on session T, subjects {args.subjects}, seed {args.seed}",
+    subjects = sorted({r["subject"] for r in rows})
+    n_folds = max((r["fold"] for r in rows), default=0) + 1
+    lines = [f"CV tuning: {n_folds}-fold on session T, subjects {subjects}, seed {seed}",
              "(validation only -- session E never touched; re-run the winner with "
              "TrainCorrectedProtocol.py for a test number)", ""]
     ranked = []
@@ -188,16 +232,21 @@ def summarise(rows, args, results_path):
     ranked.sort(reverse=True)
 
     base = next((m for m, c, _ in ranked if c == "baseline"), None)
-    header = f"{'config':14s} {'mean val':>9s}  " + "  ".join(f"S{s}" for s in args.subjects)
+    header = f"{'config':14s} {'mean val':>9s}  " + "  ".join(f"S{s}" for s in subjects)
     lines.append(header + ("   vs baseline" if base is not None else ""))
     lines.append("-" * (len(header) + 16))
     for mean, cname, per_sub in ranked:
-        cells = "  ".join(f"{np.mean(per_sub.get(s, [np.nan]))*100:4.1f}" for s in args.subjects)
+        cells = "  ".join(f"{np.mean(per_sub.get(s, [np.nan]))*100:4.1f}" for s in subjects)
         delta = "" if base is None else ("  (control)" if cname == "baseline" else f"  {(mean-base)*100:+5.2f}")
         lines.append(f"{cname:14s} {mean*100:9.2f}  {cells}{delta}")
-    n = args.folds * len(args.subjects)
-    lines += ["", f"each mean averages {n} fold-runs; binomial std err at p=0.75 is "
-                  f"~{np.sqrt(.75*.25/(36*args.folds))*100:.1f} points per subject.",
+    n = n_folds * len(subjects)
+    # With every fold complete, each of the 288 session-T trials is validated
+    # exactly once, so a per-subject CV score rests on all 288 -- binomial std
+    # err sqrt(.75*.25/288) = 2.6 points, against 7.2 for a single 36-trial
+    # split. (Folds share training data, so this is a floor, not an exact CI.)
+    se = np.sqrt(.75 * .25 / 288) * 100
+    lines += ["", f"each config mean averages {n} fold-runs ({n_folds} folds x {len(subjects)} subject(s)); "
+                  f"per-subject binomial std err at p=0.75 is ~{se:.1f} points.",
               "treat gaps smaller than that as ties and prefer the simpler config."]
     out = "\n".join(lines)
     with open(os.path.join(os.path.dirname(results_path), "cv_summary.txt"), "w") as f:
