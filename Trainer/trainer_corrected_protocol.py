@@ -222,7 +222,10 @@ class CorrectedProtocolTrainer:
                 break
 
         self.model.load_state_dict(best_state)
-        test_acc = self._eval(testloader)  # touched exactly once
+        # testloader=None is the hyperparameter-tuning path (TuneCV.py): no
+        # test number is produced at all, so a tuning sweep cannot touch the
+        # held-out session even by accident.
+        test_acc = self._eval(testloader) if testloader is not None else None
         elapsed = time.monotonic() - t0
 
         if ckpt_path is not None and os.path.exists(ckpt_path):

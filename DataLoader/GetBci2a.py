@@ -185,6 +185,56 @@ def getAllDataloader_toT_E(subject, ratio, data_path, bs):
 
     return trainloader, validloader
 
+def getCVFolds(subject, n_folds, data_path, bs, val_bs=2):
+    """Stratified k-fold cross-validation folds from session T ONLY.
+
+    For hyperparameter tuning. A single 36-trial validation split is far too
+    noisy to choose between configurations: at ~75% accuracy its binomial
+    standard error is 7.2 points, and measured on this repo's own runs the
+    within-subject correlation between validation and test accuracy is
+    r=+0.11 (p=0.60) -- i.e. picking the best-validation run picks noise.
+    Averaging over k folds uses all 288 session-T trials for the decision and
+    cuts that standard error to 2.6 points.
+
+    Session E is NEVER loaded here, by construction -- the held-out test set
+    cannot leak into a tuning decision if this function cannot read it.
+
+    With n_folds=8 each fold is 252 train / 36 validation, exactly matching
+    the split sizes of the reporting protocol in getAllDataloader(), so
+    hyperparameters chosen here transfer to the final runs.
+
+    Returns a list of (trainloader, validloader), one per fold.
+    """
+    train = io.loadmat(os.path.join(data_path, 'BCIC_S' + f'{subject:02d}' + '_T.mat'))
+    x = torch.Tensor(train['x_train'])[:, :, 124:562]
+    y = torch.Tensor(train['y_train']).view(-1).long()
+
+    # Stratified: split each class's trials into n_folds contiguous chunks,
+    # so every fold holds the same class balance as the whole session.
+    per_class_chunks = []
+    for c in torch.unique(y):
+        idx = torch.nonzero(y == c).flatten()
+        per_class_chunks.append(torch.chunk(idx, n_folds))
+
+    folds = []
+    for f in range(n_folds):
+        val_idx = torch.cat([chunks[f] for chunks in per_class_chunks])
+        mask = torch.ones(len(y), dtype=torch.bool)
+        mask[val_idx] = False
+        tr_idx = torch.nonzero(mask).flatten()
+
+        trainloader = Data.DataLoader(
+            dataset=Data.TensorDataset(x[tr_idx], y[tr_idx]),
+            batch_size=bs, shuffle=True, num_workers=0, pin_memory=True,
+        )
+        validloader = Data.DataLoader(
+            dataset=Data.TensorDataset(x[val_idx], y[val_idx]),
+            batch_size=val_bs, shuffle=False, num_workers=0, pin_memory=True,
+        )
+        folds.append((trainloader, validloader))
+    return folds
+
+
 def getDeep(data_path, ratio, bs):
     x = np.load(os.path.join(data_path, 'data.npy'))
     y = np.load(os.path.join(data_path, '4classes_label.npy'))
