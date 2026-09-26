@@ -82,6 +82,21 @@ CONFIGS = {
     # only change that has ever helped. More of it may help more.
     "aug_2x": {"aug_rate": 2.0},
     "aug_seg16": {"aug_segments": 16},
+
+    # ---- Round 2 -------------------------------------------------------
+    # Round 1 (4-fold, S3/S4/S6) said the binding constraint is overfitting,
+    # not capacity: small_both +2.55 (wilcoxon p=0.029), small_states +1.85,
+    # small_dmodel +1.50, dropout_6 +1.50, while both learning-rate changes
+    # LOST. The best_epoch traces make the mechanism plain -- on S4 the
+    # 0.496M baseline peaks at median epoch 70 and never improves again,
+    # where small_both keeps improving to 322.
+    # So: refine the capacity optimum (tiny, at 24/8, overshot to -0.81) and
+    # stack the independent regularisers on top of small_both.
+    "d32_s16": {"d_model": 32, "statenum": 16},
+    "d40_s12": {"d_model": 40, "statenum": 12},
+    "sb_do6": {"d_model": 32, "statenum": 12, "dropout": 0.6},
+    "sb_seg16": {"d_model": 32, "statenum": 12, "aug_segments": 16},
+    "sb_do6_seg16": {"d_model": 32, "statenum": 12, "dropout": 0.6, "aug_segments": 16},
 }
 
 
